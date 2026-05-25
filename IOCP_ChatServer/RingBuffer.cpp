@@ -1,11 +1,10 @@
-#include <cmath>
 #include <string.h>
 #include <algorithm>
 #include "RingBuffer.h"
 
 bool RingBuffer::Write(const void* src, int size)
 {
-    if (size > (RING_SIZE - storedBytes))
+    if ((unsigned int)size > (RING_SIZE - storedBytes))
         return false; // 공간 부족
 
     int firstCopy = std::min(size, RING_SIZE - writePos);
@@ -23,7 +22,7 @@ bool RingBuffer::Write(const void* src, int size)
 
 bool RingBuffer::Peek(void* dst, int size)
 {
-    if (storedBytes < size)
+    if (storedBytes < (unsigned int)size)
         return false;
 
     int firstCopy = std::min(size, RING_SIZE - readPos);
@@ -50,11 +49,6 @@ bool RingBuffer::Read(void* dst, int size)
 bool RingBuffer::Has(size_t size) const
 {
     return storedBytes >= size;
-}
-
-char* RingBuffer::GetReadPtr()
-{
-    return buffer + readPos;
 }
 
 void RingBuffer::Skip(size_t size)

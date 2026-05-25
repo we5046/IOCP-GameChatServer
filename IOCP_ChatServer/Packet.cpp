@@ -9,8 +9,5 @@ bool Packet::IsValid() const
     if (header.size > MAX_PACKET_SIZE)
         return false;
 
-    if (!IsKnownPacketId(header.id))
-        return false;
-
     return true;
 }

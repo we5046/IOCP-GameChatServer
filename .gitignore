@@ -51,3 +51,6 @@ out/
 *.tmp
 Thumbs.db
 Desktop.ini
+
+code_review.md
+**/code_review.md

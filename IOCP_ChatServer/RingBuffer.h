@@ -11,6 +11,5 @@ struct RingBuffer
 	bool Peek(void* dst, int size);
 	bool Read(void* dst, int size);
 	bool Has(size_t size) const;
-	char* GetReadPtr();
 	void Skip(size_t size);
 };

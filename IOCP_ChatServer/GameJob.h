@@ -9,15 +9,16 @@ enum class GameJobType
 	Packet,
 	Disconnect,
 	Connect,
-	SessionCleanupDone,
+	Shutdown,
+	None
 };
 
 struct GameJob
 {
-	GameJobType type;
-	Session* session;
+	GameJobType type = GameJobType::None;
+	Session* session = nullptr;
 
-	// Used only for Packet jobs.
+	// Packet일 때만 사용
 	PacketHeader header;
-	std::vector<char> body;		// body.size() == header.size - sizeof(PacketHeader)
+	std::vector<char> body;		// body.size() == header.size() - sizeof(PACKETHEADER);
 };

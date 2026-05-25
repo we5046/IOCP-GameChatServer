@@ -1,27 +1,11 @@
 #pragma once
 #include <cstdint>
 
-// Packet ID list.
-enum PACKET_ID : uint16_t
-{
-	PKT_CS_LOGIN = 1, // client -> server: set nickname
-	PKT_CS_CHAT = 2, // client -> server: chat message
-	PKT_SC_CHAT = 3, // server -> client: chat message
-	PKT_CS_ENTER_ROOM = 4
-};
-
-#pragma pack(push, 1)
-struct PktCSEnterRoom
-{
-	int32_t roomId;
-};
-#pragma pack(pop)
-
 #pragma pack(push, 1)
 struct PacketHeader
 {
-	uint16_t size;	// Total packet size: header + body.
-	uint16_t id;	// Packet ID.
+	uint16_t size;	// 전체 패킷 길이 (header + body)
+	uint16_t id;	// 패킷 ID
 };
 #pragma pack(pop)
 
@@ -29,8 +13,12 @@ struct PacketHeader
 struct Packet
 {
 	PacketHeader header;
-	const char* body;	// Payload view. Packet does not own the data.
+	const char* body;	// 실제 payload, Packet은 데이터를 소유하지 않음. 참조만 한다.
 
-	bool IsValid() const;
+	bool IsValid() const;		// NETWORK DEFENSE
+
 };
 #pragma pack(pop)
+
+// Maximum allowed packet size (header + body)
+constexpr uint16_t MAX_PACKET_SIZE = 4096;

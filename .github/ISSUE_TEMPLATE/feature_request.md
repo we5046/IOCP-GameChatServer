@@ -1,9 +1,9 @@
 ---
 name: Feature request
 about: Suggest an improvement or new server feature
-title: '[Feature] '
+title: "[Feature] "
 labels: enhancement
-assignees: ''
+assignees: ""
 ---
 
 ## Summary
@@ -39,4 +39,6 @@ Add related files, risks, or references.
 
 ## Korean Summary
 
-3줄 요약
+- 개선하거나 추가하고 싶은 기능을 설명합니다.
+- 서버 구조, 네트워크, 패킷, 문서 중 영향 범위를 체크합니다.
+- 완료 조건을 명확히 적어 작업 범위를 정리합니다.

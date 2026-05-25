@@ -4,6 +4,9 @@
 *.suo
 *.userosscache
 *.sln.docstates
+*.rsuser
+*.vcxproj.user
+*.vcxproj.filters.user
 
 # Build outputs
 [Dd]ebug/
@@ -28,6 +31,10 @@ Libraries/
 *.exp
 *.ipdb
 *.iobj
+*.res
+*.aps
+*.ncb
+*.opendb
 *.lastbuildstate
 *.recipe
 *.tlog
@@ -37,6 +44,8 @@ Libraries/
 *.vcxproj.FileListAbsolute.txt
 *.VC.db
 *.VC.VC.opendb
+Browse.VC.db
+ipch/
 
 # CMake, if added later
 CMakeFiles/
@@ -44,13 +53,25 @@ CMakeCache.txt
 cmake-build-*/
 out/
 
+# Local notes
+code_review.md
+**/code_review.md
+
+# Temporary files
+*.bak
+*.orig
+*.rej
+*.cache
+*.pid
+*.seed
+*.pid.lock
+
 # Editor / OS
 .vscode/
 .idea/
 *.swp
+*.swo
 *.tmp
+*.temp
 Thumbs.db
 Desktop.ini
-
-code_review.md
-**/code_review.md

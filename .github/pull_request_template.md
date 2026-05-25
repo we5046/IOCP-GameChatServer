@@ -35,4 +35,6 @@ Mention important implementation details, risks, or follow-up work.
 
 ## Korean Summary
 
-3줄 요약
+- 변경 내용을 짧게 설명합니다.
+- 테스트 여부와 영향 범위를 체크합니다.
+- 리뷰어가 주의해야 할 위험이나 후속 작업을 적습니다.

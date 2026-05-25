@@ -1,4 +1,4 @@
-﻿#include <winsock2.h>
+#include <winsock2.h>
 #include <WS2tcpip.h>
 #include <windows.h>
 #include <iostream>
@@ -19,14 +19,10 @@
 unsigned int GetWorkerThreadCount();
 bool StartWorkerThreads();
 
-
-
-
 bool IsKnownPacketId(uint16_t id);
 
 DWORD WINAPI WorkerThread(LPVOID lpParam);
 
-// Network.cpp
 bool Network::Init()
 {
 	InitializeCriticalSection(&g_lock);
@@ -50,8 +46,7 @@ Network::~Network()
 	DeleteCriticalSection(&g_lock);
 }
 
-
-// 아마도 하드웨어 스레드 개수 구하는 것 같은데 
+// Choose worker count from hardware concurrency.
 unsigned int GetWorkerThreadCount()
 {
 	unsigned int n = std::thread::hardware_concurrency();
@@ -108,7 +103,7 @@ DWORD WINAPI WorkerThread(LPVOID lpParam)
 	{
 		DWORD bytesTransferred = 0;
 		Session* session = nullptr;
-		LPOVERLAPPED overlapped = nullptr;	
+		LPOVERLAPPED overlapped = nullptr;
 
 		bool ret = GetQueuedCompletionStatus(
 			hIocp,
@@ -120,9 +115,7 @@ DWORD WINAPI WorkerThread(LPVOID lpParam)
 		if (session == nullptr)
 			continue;
 
-		// =========================
-		// 1. 완료된 I/O 처리 (항상!)
-		// =========================
+		// 1. Handle completed I/O.
 		if (overlapped == session->GetRecvOverlapped())
 		{
 			session->OnRecvComplete(bytesTransferred);
@@ -135,17 +128,14 @@ DWORD WINAPI WorkerThread(LPVOID lpParam)
 		}
 		else if(overlapped == nullptr)
 		{
-			// GameServer에서 cleanup check 용으로 보낸 것
-			// 공통 삭제 체크는 아래에서 처리
+			// Cleanup check event posted by GameServer.
 		}
 		else
 		{
-			// 예상치 못한 overlapped -> 로그 기록
+			// Unexpected overlapped. Production code should log this.
 		}
 
-		// =========================
-		// 2. 에러 / FIN 처리
-		// =========================
+		// 2. Handle error or FIN.
 		if (!ret || bytesTransferred == 0)
 		{
 			std::cout << "[Worker] Disconnect detected. err="
@@ -154,20 +144,17 @@ DWORD WINAPI WorkerThread(LPVOID lpParam)
 			session->RequestClose();
 		}
 
-		// =========================
-		// 3. 공통 삭제 체크 (항상)
-		// =========================
+		// 3. Delete the session only after game cleanup and all I/O completes.
 		if (session->GetState() == SessionState::Closing &&
 			session->IsGamecleanupDone() &&
 			session->GetPendingIO() == 0)
 		{
 			Network::Instance().RemoveSession(session);
-			session->Close();   // shutdown + closesocket
+			session->Close();
 			delete session;
 		}
 	}
 	return 0;
-
 }
 
 int main()
@@ -175,9 +162,7 @@ int main()
 	WSAData wsa;
 	WSAStartup(MAKEWORD(2, 2), &wsa);
 
-
-
-	// GameThread 먼저 시작
+	// Start the game thread first.
 	HANDLE hGameThread = CreateThread(
 		NULL,
 		0,
@@ -192,8 +177,8 @@ int main()
 	}
 	else
 	{
-		// gameThread.detach(); 와 같은 행위
-		CloseHandle(hGameThread); // 핸들을 닫아도 스레드는 계속 돈다 (Detach와 동일)
+		// Close only the thread handle. The thread keeps running.
+		CloseHandle(hGameThread);
 	}
 	//std::thread gameThread([]() {
 	//	GameServer::Instance().GameThreadLoop();
@@ -209,10 +194,10 @@ int main()
 	bind(listenSock, (SOCKADDR*)&listenAddr, sizeof(listenAddr));
 	listen(listenSock, SOMAXCONN);
 
-	// 인자 넣는거 못외움
+	// Initialize IOCP and worker threads.
 	if (!Network::Instance().Init())
 	{
-		std::cout << "Network Init 실패\n";
+		std::cout << "Network Init failed\n";
 		return -1;
 	}
 	//gIOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
@@ -227,12 +212,12 @@ int main()
 
 		Session* session = new Session(client);
 
-		std::cout << "Client " << client << "접속\n";
+		std::cout << "Client " << client << " connected\n";
 
 		Network::Instance().AddSession(session);
 		GameServer::Instance().EnqueueConnectJob(session);
 
-		// 서버에 접속한 클라이언트를 IOCP로 감시해주세요. 다만 KEY는 이제부터 Session*
+		// Register the client socket to IOCP and use Session* as the completion key.
 		CreateIoCompletionPort((HANDLE)client, Network::Instance().GetIocpHandle(), (ULONG_PTR)session, 0);
 
 		session->PostRecv();
@@ -240,5 +225,4 @@ int main()
 
 	WSACleanup();
 	return 0;
-
 }

@@ -17,7 +17,7 @@ struct GameJob
 	GameJobType type;
 	Session* session;
 
-	// Packet일 때만 사용
+	// Used only for Packet jobs.
 	PacketHeader header;
-	std::vector<char> body;		// body.size() == header.size() + sizeof(PACKETHEADER);
+	std::vector<char> body;		// body.size() == header.size - sizeof(PacketHeader)
 };

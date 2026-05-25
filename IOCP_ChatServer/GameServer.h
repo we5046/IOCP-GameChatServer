@@ -10,9 +10,7 @@ class Player;
 class Room;
 struct Packet;
 
-// Player 소유자
-// Session이 끊긴다 -> Player 처리
-// Room에게 명령만 한다.
+// Owns Player objects and coordinates Room commands.
 class GameServer
 {
 private:
@@ -26,7 +24,7 @@ private:
 	void HandleChat(Session* p, const Packet& pkt);
 	void HandleEnterRoom(Session* s, const Packet& pkt);
 
-	// 방 관련 헬퍼 함수
+	// Room helpers.
 	Room* FindRoom(int32_t roomId);
 	Room* GetOrCreateRoom(int32_t roomId);
 	void EnterRoom(Player* p, int32_t roomId);
@@ -37,15 +35,15 @@ public:
 	void OnPacket(Session* s, const Packet& pkt);
 	void OnSessionDisconnected(Session* s);
 	void OnSessionConnected(Session* s);
-	//new
+
+	// Enqueue jobs from network threads to the game thread.
 	void EnqueuePacketJob(Session* s, const Packet& pkt);
 	void EnqueueDisconnectJob(Session* s);
 	void EnqueueConnectJob(Session* s);
 
-	// gameThread
+	// GameThread entry point.
 	static DWORD WINAPI GameThreadEntry(LPVOID lpParam);
 	void GameThreadLoop();
 
-	// 생성자에서 기본 로비 같은 것도 만들어 줄 수 있음
 	GameServer();
 };

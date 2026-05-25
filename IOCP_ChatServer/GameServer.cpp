@@ -5,14 +5,14 @@
 #include "Network.h"
 #include <iostream>
 
-// Singleton Instance
+// Singleton instance.
 GameServer& GameServer::Instance()
 {
 	static GameServer instance;
 	return instance;
 }
 
-// 공용 진입점: Protocol이 여기로 호출함
+// Game logic entry point for packets validated by Protocol.
 void GameServer::OnPacket(Session* s, const Packet& pkt)
 {
 	switch (pkt.header.id)
@@ -39,13 +39,13 @@ void GameServer::HandleEnterRoom(Session* s, const Packet& pkt)
 	Player* p = players[s];
 	if (!p->IsLoggedIn())
 	{
-		std::cout << "[Warning] Login 없이 EnterRoom 패킷 도착! session=" << s << "\n";
+		std::cout << "[Warning] EnterRoom packet arrived before login. session=" << s << "\n";
 		return;
 	}
 
 	if (pkt.header.size < sizeof(PacketHeader) + sizeof(int32_t))
 	{
-		std::cout << "PKT_CS_ENTER_ROOM 패킷이 도착하지 않고 알수없는 패킷 도착\n";
+		std::cout << "Invalid PKT_CS_ENTER_ROOM packet\n";
 		return;
 	}
 
@@ -54,10 +54,10 @@ void GameServer::HandleEnterRoom(Session* s, const Packet& pkt)
 
 	EnterRoom(p, roomId);
 
-	std::cout << "[GameServer] Player " << p->GetName() << "님이 " << roomId << "에 입장하셨습니다.\n";
+	std::cout << "[GameServer] Player " << p->GetName() << " entered room " << roomId << ".\n";
 }
 
-// 로그인 처리 : SetName 패킷
+// Login: store the nickname sent by the client.
 void GameServer::HandleLogin(Session* s, const Packet& pkt)
 {
 	const int bodySize = pkt.header.size - sizeof(PacketHeader);
@@ -71,11 +71,11 @@ void GameServer::HandleLogin(Session* s, const Packet& pkt)
 		return;
 
 	p->SetName(name);
-	
+
 	std::cout << "[GameServer] Login: " << name << "\n";
 }
 
-// 채팅 처리
+// Chat: broadcast the message to the player's current room.
 void GameServer::HandleChat(Session* s, const Packet& pkt)
 {
 	Player* p = players[s];
@@ -102,7 +102,7 @@ Room* GameServer::FindRoom(int32_t roomId)
 	{
 		return it->second.get();
 	}
-	
+
 	return nullptr;
 }
 
@@ -122,7 +122,7 @@ void GameServer::EnterRoom(Player* p, int32_t roomId)
 	if (!p)
 		return;
 
-	// 기존 방에서 빼고
+	// Leave the previous room first.
 	if (Room* old = p->GetRoom())
 	{
 		old->Leave(p);
@@ -143,7 +143,7 @@ void GameServer::LeaveRoom(Player* p)
 	}
 }
 
-// 세션 끊김 처리: Disconnect 이벤트가 들어왔을 때 호출
+// Disconnect handling on the game thread.
 void GameServer::OnSessionDisconnected(Session* s)
 {
 	auto it = players.find(s);
@@ -155,23 +155,22 @@ void GameServer::OnSessionDisconnected(Session* s)
 		players.erase(it);
 		delete p;
 
-		
 		std::cout << "[GameServer] Session disconnected, Player removed\n";
 	}
 	else
 	{
-		std::cout << "[GameServer] Session disconnected, but Player not founded\n";
+		std::cout << "[GameServer] Session disconnected, but Player not found\n";
 	}
 
-	// 여기서 이제 다시 packet 0을 보내서 종료신호. 혹은 SYN-ACK 패킷을 보내는 거임 서버로
+	// Mark that game-side cleanup is complete.
 	s->MarkGameCleanupDone();
 
-	// WorkerThread 깨우기
+	// Wake a worker so it can check pending I/O and delete the session if safe.
 	PostQueuedCompletionStatus(
 		Network::Instance().GetIocpHandle(),
 		0,
 		reinterpret_cast<ULONG_PTR>(s),
-		nullptr   // overlapped == nullptr → “cleanup check”
+		nullptr   // overlapped == nullptr: cleanup check
 	);
 }
 
@@ -232,7 +231,7 @@ void GameServer::GameThreadLoop()
 		{
 		case GameJobType::Packet:
 		{
-			// Packet 구조체 하나를 임시로 만들어서 OnPacket에 넘긴다.
+			// Rebuild a temporary Packet view from copied GameJob data.
 			Packet pkt;
 			pkt.header = job.header;
 			pkt.body = job.body.data();
@@ -243,7 +242,7 @@ void GameServer::GameThreadLoop()
 		case GameJobType::Disconnect:
 			OnSessionDisconnected(job.session);
 			break;
-		
+
 		case GameJobType::Connect:
 			OnSessionConnected(job.session);
 			break;
@@ -253,8 +252,7 @@ void GameServer::GameThreadLoop()
 
 GameServer::GameServer() : running(true)
 {
-	// 1번방을 로비로 사용
-	// C++14 문법
+	// Room 1 is the default lobby.
 	auto lobby = std::make_unique<Room>(1);
 	rooms.emplace(1, std::move(lobby));
 }

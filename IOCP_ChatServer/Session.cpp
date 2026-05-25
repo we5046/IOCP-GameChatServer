@@ -5,7 +5,6 @@
 #include "Protocol.h"
 #include "GameServer.h"
 
-
 Session::Session(SOCKET s)
 {
 	sock = s;
@@ -15,8 +14,8 @@ Session::Session(SOCKET s)
 	recvWsabuf.buf = recvBuffer;
 	recvWsabuf.len = BUFFER_SIZE;
 
-	sendWsabuf.buf = nullptr;		// 실제 전송할때 sendQueue.front().data()로 설정함.
-	sendWsabuf.len = 0;				// 실제 전송할때 sendQueue.front().size()로 설정함. 
+	sendWsabuf.buf = nullptr;		// Set to sendQueue.front().data() right before sending.
+	sendWsabuf.len = 0;				// Set to sendQueue.front().size() right before sending.
 
 	ZeroMemory(recvBuffer, BUFFER_SIZE);
 
@@ -31,11 +30,11 @@ void Session::PostRecv()
 	bool expected = false;
 	if(!recvPosted.compare_exchange_strong(expected, true))
 	{
-		// 이미 등록된 상태
+		// A recv operation is already posted.
 		return;
 	}
 
-	// I/O 하나 등록 → pendingIO 증가
+	// One I/O operation is being posted.
 	pendingIO.fetch_add(1);
 
 	ZeroMemory(&recvOverlapped, sizeof(recvOverlapped));
@@ -54,8 +53,7 @@ void Session::PostRecv()
 
 	if (ret == SOCKET_ERROR && GetLastError() != WSA_IO_PENDING)
 	{
-		std::cout << "WSARECV 등록 실패 " << "\n";
-		// 등록 실패 → 롤백
+		std::cout << "WSARecv post failed\n";
 		recvPosted.store(false);
 		pendingIO.fetch_sub(1);
 		RequestClose();
@@ -70,7 +68,7 @@ void Session::PostSend()
 	bool expected = false;
 	if(!sendPosted.compare_exchange_strong(expected, true))
 	{
-		// 이미 등록된 상태
+		// A send operation is already posted.
 		return;
 	}
 
@@ -78,22 +76,20 @@ void Session::PostSend()
 	{
 		std::lock_guard<std::mutex> lock(sendMutex);
 		if (sendQueue.empty()) {
-			// 보낼 게 없는데 sendPosted만 true가 됐으면 롤백
 			sendPosted.store(false);
 			isSending = false;
 			return;
 		}
 		pkt = &sendQueue.front();
 	}
-	// 메시지를 sendBuffer에 복사
 
+	// Send the first packet in the queue.
 	ZeroMemory(&sendOverlapped, sizeof(sendOverlapped));
 
 	sendWsabuf.buf = pkt->data();
 	sendWsabuf.len = (ULONG)pkt->size();
 
 	DWORD bytes = 0;
-	// I/O 등록 → pendingIO 증가
 	pendingIO.fetch_add(1, std::memory_order_relaxed);
 
 	int ret = WSASend(
@@ -107,7 +103,7 @@ void Session::PostSend()
 
 	if (ret == SOCKET_ERROR && GetLastError() != WSA_IO_PENDING)
 	{
-		std::cout << "WSASEND 실패" << "\n";
+		std::cout << "WSASend failed\n";
 		sendPosted.store(false);
 		pendingIO.fetch_sub(1, std::memory_order_relaxed);
 		RequestClose();
@@ -121,28 +117,26 @@ void Session::OnRecvComplete(DWORD bytes)
 {
 	recvPosted.store(false);
 	pendingIO.fetch_sub(1);
-	
+
 	if (bytes == 0)
 	{
-		// 상대방이 정상 종료한 경우
+		// The peer closed the connection gracefully.
 		RequestClose();
 		return;
 	}
 
-	// 이미 Closing 상태면 데이터 무시
 	if (GetState() == SessionState::Closing)
 		return;
 
-	// 이번에 Recv된 데이터를 RingBuffer에 Write
+	// Append received bytes to the stream buffer.
 	if (!recvRing.Write(recvBuffer, bytes))
 	{
-		// overflow → 서버 정책에 따라 세션 끊기
 		std::cout << "[Session] RecvRing overflow, closing session\n";
 		RequestClose();
 		return;
 	}
 
-	// 2) RingBuffer에서 패킷 단위로 뽑아서 ProcessPacket 호출
+	// Extract complete packets from the stream buffer.
 	while (true)
 	{
 		if (!recvRing.Has(sizeof(PacketHeader)))
@@ -166,7 +160,7 @@ void Session::OnRecvComplete(DWORD bytes)
 
 		recvRing.Skip(pkt.header.size - sizeof(PacketHeader));
 	}
-	// 다시 recv 등록
+
 	PostRecv();
 }
 
@@ -175,7 +169,6 @@ void Session::OnSendComplete(DWORD bytes)
 	sendPosted.store(false);
 	pendingIO.fetch_sub(1);
 
-	// 에러 / FIN
 	if (bytes == 0)
 	{
 		RequestClose();
@@ -185,10 +178,10 @@ void Session::OnSendComplete(DWORD bytes)
 	bool hasMore = false;
 	{
 		std::lock_guard<std::mutex> lock(sendMutex);
-		if (!sendQueue.empty()) 
+		if (!sendQueue.empty())
 			sendQueue.pop_front();
 		hasMore = !sendQueue.empty();
-		if (!hasMore) 
+		if (!hasMore)
 			isSending = false;
 	}
 
@@ -198,15 +191,11 @@ void Session::OnSendComplete(DWORD bytes)
 
 void Session::RequestClose()
 {
-	// 이미 종료중이라면 아무 것도 안 한다.
 	SessionState expected = SessionState::Connected;
 	if (!state.compare_exchange_strong(expected, SessionState::Closing))
 		return;
 
-	// 여기서 하는 일은 딱 1개: GameServer에게 "논리적 disconnect" 알림
 	GameServer::Instance().EnqueueDisconnectJob(this);
-
-	// shutdown/closesocket 금지 (물리 종료는 WorkerThread에서만)
 }
 
 WSAOVERLAPPED* Session::GetRecvOverlapped() { return &recvOverlapped; }
@@ -219,17 +208,13 @@ void Session::SendPacket(uint16_t id, const void* data, uint16_t dataSize)
 
 	uint16_t packetSize = sizeof(PacketHeader) + dataSize;
 
-	// 1) 패킷 하나를 통째로 담을 buffer 생성
 	std::vector<char> packet(packetSize);
 
-	// 2) 헤더 채우기
 	PacketHeader header = { packetSize, id };
 
-	// 3) [헤더][바디] 복사
 	memcpy(packet.data(), &header, sizeof(header));
 	memcpy(packet.data() + sizeof(header), data, dataSize);
 
-	// 4) 큐에 push
 	bool needKick = false;
 	{
 		std::lock_guard<std::mutex> lock(sendMutex);
@@ -241,7 +226,6 @@ void Session::SendPacket(uint16_t id, const void* data, uint16_t dataSize)
 		}
 	}
 
-	// 5) 지금 아무 것도 안 보내는 중이면 전송 시작
 	if (needKick)
 	{
 		PostSend();

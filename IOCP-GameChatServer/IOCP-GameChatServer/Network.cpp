@@ -322,6 +322,8 @@ BOOL WINAPI ConsoleHandler(DWORD ctrlType)
 
 int main()
 {
+	SetConsoleOutputCP(CP_UTF8);
+	SetConsoleCP(CP_UTF8);
 	SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 	WSAData wsa;
 	WSAStartup(MAKEWORD(2, 2), &wsa);

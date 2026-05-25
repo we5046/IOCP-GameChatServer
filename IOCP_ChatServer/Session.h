@@ -1,14 +1,15 @@
 #pragma once
 #include <Winsock2.h>
-#include <deque>
+#include <Windows.h>
+#include <atomic>
+#include <cstdint>
 #include <vector>
 
 #include "RingBuffer.h"
-#include <string>
-#include <atomic>
-#include <mutex>
 
 constexpr size_t BUFFER_SIZE = 4096;
+
+class Session;
 
 enum class SessionState
 {
@@ -17,70 +18,86 @@ enum class SessionState
 	Closed
 };
 
+enum class IoType
+{
+	Recv,
+	Send
+};
+
+struct IocpContext
+{
+	OVERLAPPED overlapped;
+	IoType type;
+
+	explicit IocpContext(IoType t) : type(t)
+	{
+		ZeroMemory(&overlapped, sizeof(overlapped));
+	}
+};
+
+struct RecvContext : IocpContext
+{
+	WSABUF wsabuf;
+	char buffer[BUFFER_SIZE];
+
+	RecvContext() : IocpContext(IoType::Recv)
+	{
+		ZeroMemory(buffer, sizeof(buffer));
+		wsabuf.buf = buffer;
+		wsabuf.len = BUFFER_SIZE;
+	}
+};
+
+struct SendContext : IocpContext
+{
+	WSABUF wsabuf;
+	std::vector<char> buffer;
+
+	SendContext(const char* data, int len)
+		: IocpContext(IoType::Send), buffer(data, data + len)
+	{
+		wsabuf.buf = buffer.data();
+		wsabuf.len = static_cast<ULONG>(buffer.size());
+	}
+};
+
 class Session
 {
 private:
-	SOCKET sock;		// USER SOCKET
+	SOCKET sock;
 
 	std::atomic<SessionState> state{ SessionState::Connected };
-	std::atomic<bool> gameCleanupDone{ false }; // GameServer가 Player/Room 정리 끝냈다는 의미;
-	std::atomic<long> pendingIO;
-	std::mutex sendMutex;
+	std::atomic<bool> gameCleanupDone{ false };
+	std::atomic<long> pendingIO{ 0 };
 	std::atomic<bool> destroying{ false };
-
-	// "등록 여부"를 보장하는 플래그 (중요)
 	std::atomic<bool> recvPosted{ false };
-	std::atomic<bool> sendPosted{ false };
+	std::atomic<bool> closeIssued{ false };
 
-	// ---- RECV ----
-	WSAOVERLAPPED recvOverlapped;	// recvI/O용 OVERLAPPED
-	WSABUF recvWsabuf;				// .buf: recvBuffer 포인터, .len: 길이
-	char recvBuffer[BUFFER_SIZE];	// 커널 -> 유저 공간으로 1차로 받아 놓는 임시 버퍼
-	RingBuffer recvRing;			// TCP 스트림을 쌓아두고 패킷 단위로 잘라내는 링버퍼
+	RecvContext recvContext;
+	RingBuffer recvRing;
 
-	// ---- SEND ----
-	WSAOVERLAPPED sendOverlapped;	// sendI/O용 OVERLAPPED
-	WSABUF sendWsabuf;				// 현재 보내는 패킷의 data, len 임시 담는 용도, 초기값 세팅 필요 X -> 보내기 직전에 PostSend 함수에서 설정
-	std::deque<std::vector<char>> sendQueue;		// 보낼 메시지를 쌓아두는 FIFO, 실제 WSASend의 대상이 되는 버퍼들
-
-	size_t sendOffset = 0; // sendQueue.front()의 부분 전송 오프셋(sendMutex로 보호)
-
+	void PostSend(const char* data, int len);
 
 public:
+	explicit Session(SOCKET s);
 
-	Session(SOCKET s);
-
-	//IO 등록
 	void PostRecv();
-	void PostSend();
 
-	// IO 완료 콜백 (To WorkerThread)
-	void OnRecvComplete(DWORD bytes);
-	void OnSendComplete(DWORD bytes);
-	
+	void OnRecvComplete(DWORD bytes, bool success);
+	void OnSendComplete(SendContext* context, DWORD bytes, bool success);
 
-	
-	// 논리 종료 요청 (수정1)
-	void RequestClose(); // isClosing = true 등
-
-	// 실제 소켓 종료(물리적인 close)
+	void RequestClose();
 	void Close();
 
-	// 패킷 전송
 	void SendPacket(uint16_t id, const void* data, uint16_t dataSize);
 
 	bool TryBeginDestroy();
 
-	// 상태/정보 조회
 	SessionState GetState() const { return state.load(std::memory_order_acquire); }
 	long GetPendingIO() const { return pendingIO.load(std::memory_order_acquire); }
-	bool IsGamecleanupDone() const { return gameCleanupDone.load(); }
+	bool IsGamecleanupDone() const { return gameCleanupDone.load(std::memory_order_acquire); }
 
-	void MarkGameCleanupDone() { gameCleanupDone.store(true); }
+	void MarkGameCleanupDone() { gameCleanupDone.store(true, std::memory_order_release); }
 
 	SOCKET& GetSocket();
-
-	// IOCP 구분용
-	WSAOVERLAPPED* GetRecvOverlapped();
-	WSAOVERLAPPED* GetSendOverlapped(); 
 };

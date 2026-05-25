@@ -1,363 +1,288 @@
 #include "Session.h"
-#include <string>
-#include <iostream>
-#include "Packet.h"
-#include "Protocol.h"
-#include "GameServer.h"
 
 #include <Windows.h>
+#include <cstring>
+#include <iostream>
 
-Session::Session(SOCKET s)
+#include "GameServer.h"
+#include "Packet.h"
+#include "Protocol.h"
+
+Session::Session(SOCKET s) : sock(s)
 {
-	sock = s;
-	ZeroMemory(&recvOverlapped, sizeof(WSAOVERLAPPED));
-	ZeroMemory(&sendOverlapped, sizeof(WSAOVERLAPPED));
-
-	recvWsabuf.buf = recvBuffer;
-	recvWsabuf.len = BUFFER_SIZE;
-
-	sendWsabuf.buf = nullptr;		// 실제 전송할때 sendQueue.front().data()로 설정함.
-	sendWsabuf.len = 0;				// 실제 전송할때 sendQueue.front().size()로 설정함. 
-
-	ZeroMemory(recvBuffer, BUFFER_SIZE);
-
-	pendingIO = 0;
 }
 
 void Session::PostRecv()
 {
-	if(GetState() != SessionState::Connected)
+	if (GetState() != SessionState::Connected)
 		return;
 
 	bool expected = false;
-	if(!recvPosted.compare_exchange_strong(expected, true))
-	{
-		// 이미 등록된 상태
+	if (!recvPosted.compare_exchange_strong(expected, true))
 		return;
-	}
 
-	// I/O 하나 등록 → pendingIO 증가
-	pendingIO.fetch_add(1);
-
-	ZeroMemory(&recvOverlapped, sizeof(recvOverlapped));
+	ZeroMemory(&recvContext.overlapped, sizeof(recvContext.overlapped));
+	recvContext.wsabuf.buf = recvContext.buffer;
+	recvContext.wsabuf.len = BUFFER_SIZE;
 
 	DWORD flags = 0;
 	DWORD bytes = 0;
+	pendingIO.fetch_add(1, std::memory_order_acq_rel);
 
 	int ret = WSARecv(
 		sock,
-		&recvWsabuf,
+		&recvContext.wsabuf,
 		1,
 		&bytes,
 		&flags,
-		&recvOverlapped,
+		&recvContext.overlapped,
 		nullptr);
 
-	if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING)
+	if (ret == SOCKET_ERROR)
 	{
-		std::cout << "WSARECV 등록 실패 " << "\n";
-		// 등록 실패 → 롤백
-		recvPosted.store(false);
-		pendingIO.fetch_sub(1);
-		RequestClose();
+		const int err = WSAGetLastError();
+		if (err != WSA_IO_PENDING)
+		{
+			std::cout << "[IOCP][PostRecv][FAIL] session=" << this
+				<< " sock=" << (int)sock
+				<< " err=" << err
+				<< " pendingIO=" << pendingIO.load()
+				<< " ctx=" << &recvContext
+				<< "\n";
+
+			recvPosted.store(false, std::memory_order_release);
+			pendingIO.fetch_sub(1, std::memory_order_acq_rel);
+			RequestClose();
+		}
 	}
 }
 
-void Session::PostSend()
+void Session::PostSend(const char* data, int len)
 {
-	if(GetState() == SessionState::Closed)
+	if (GetState() == SessionState::Closed)
 		return;
 
-	bool expected = false;
-	if(!sendPosted.compare_exchange_strong(expected, true))
-	{
-		// 이미 등록된 상태
+	if (data == nullptr || len <= 0 || len > MAX_PACKET_SIZE)
 		return;
-	}
 
-	char* buf = nullptr;
-	ULONG len = 0;
-	size_t queueSizeSnapshot = 0;	// 디버깅용
-	{
-		std::lock_guard<std::mutex> lock(sendMutex);
-		if (sendQueue.empty()) {
-			// 보낼 게 없는데 sendPosted만 true가 됐으면 롤백
-			sendPosted.store(false);
-			sendOffset = 0;
-			return;
-		}
-		queueSizeSnapshot = sendQueue.size(); // 디버깅용
-		auto& front = sendQueue.front();
-
-		if (sendOffset > front.size())
-			sendOffset = 0; // 안전장치
-
-		buf = front.data() + sendOffset;
-		len = (ULONG)(front.size() - sendOffset);
-	}
-	// 메시지를 sendBuffer에 복사
-
-	ZeroMemory(&sendOverlapped, sizeof(sendOverlapped));
-
-	sendWsabuf.buf = buf;
-	sendWsabuf.len = len;
+	SendContext* context = new SendContext(data, len);
 
 	#if defined(_DEBUG)
-		std::cout
-			<< "[IOCP][PostSend] session=" << this
-			<< " sock=" << (int)sock
-			<< " reqLen=" << sendWsabuf.len
-			<< " queueSize=" << queueSizeSnapshot
-			<< " pendingIO=" << pendingIO.load()
-			<< " tid=" << GetCurrentThreadId()
-			<< "\n";
+	std::cout << "[IOCP][PostSend] session=" << this
+		<< " sock=" << (int)sock
+		<< " len=" << context->wsabuf.len
+		<< " pendingIO=" << pendingIO.load()
+		<< " ctx=" << context
+		<< " tid=" << GetCurrentThreadId()
+		<< "\n";
 	#endif
 
 	DWORD bytes = 0;
-	// I/O 등록 → pendingIO 증가
-	pendingIO.fetch_add(1, std::memory_order_relaxed);
+	pendingIO.fetch_add(1, std::memory_order_acq_rel);
 
 	int ret = WSASend(
 		sock,
-		&sendWsabuf,
+		&context->wsabuf,
 		1,
 		&bytes,
 		0,
-		&sendOverlapped,
+		&context->overlapped,
 		nullptr);
 
-	if (ret == SOCKET_ERROR && WSAGetLastError() != WSA_IO_PENDING)
+	if (ret == SOCKET_ERROR)
 	{
-		#if defined(_DEBUG)
-			std::cout
-			 << "[IOCP][PostSend][FAIL] session=" << this
-			 << " sock=" << (int)sock
-			 << " reqLen=" << sendWsabuf.len
-			 << " WSAErr=" << WSAGetLastError()
-			 << " tid=" << GetCurrentThreadId()
-			 << "\n";
-		#else
-			 std::cout << "WSASEND 실패" << "\n";
-		#endif // 디버깅용
+		const int err = WSAGetLastError();
+		if (err != WSA_IO_PENDING)
+		{
+			std::cout << "[IOCP][PostSend][FAIL] session=" << this
+				<< " sock=" << (int)sock
+				<< " len=" << context->wsabuf.len
+				<< " err=" << err
+				<< " pendingIO=" << pendingIO.load()
+				<< " ctx=" << context
+				<< "\n";
 
-		sendPosted.store(false);
-		pendingIO.fetch_sub(1, std::memory_order_relaxed);
-		RequestClose();
+			pendingIO.fetch_sub(1, std::memory_order_acq_rel);
+			delete context;
+			RequestClose();
+		}
 	}
 }
 
-void Session::OnRecvComplete(DWORD bytes)
+void Session::OnRecvComplete(DWORD bytes, bool success)
 {
-	recvPosted.store(false);
-	pendingIO.fetch_sub(1);
-	
-	if (bytes == 0)
+	recvPosted.store(false, std::memory_order_release);
+	pendingIO.fetch_sub(1, std::memory_order_acq_rel);
+
+	#if defined(_DEBUG)
+	std::cout << "[IOCP][RecvComplete] session=" << this
+		<< " sock=" << (int)sock
+		<< " bytes=" << bytes
+		<< " success=" << success
+		<< " pendingIO=" << pendingIO.load()
+		<< " ctx=" << &recvContext
+		<< " tid=" << GetCurrentThreadId()
+		<< "\n";
+	#endif
+
+	if (!success || bytes == 0)
 	{
-		// 상대방이 정상 종료한 경우
 		RequestClose();
 		return;
 	}
 
-	// 이미 Closing 상태면 데이터 무시
-	if (GetState() == SessionState::Closing)
+	if (GetState() != SessionState::Connected)
 		return;
 
-	// 이번에 Recv된 데이터를 RingBuffer에 Write
-	if (!recvRing.Write(recvBuffer, bytes))
+	if (!recvRing.Write(recvContext.buffer, static_cast<int>(bytes)))
 	{
-		// overflow → 서버 정책에 따라 세션 끊기
 		std::cout << "[Session] RecvRing overflow, closing session\n";
 		RequestClose();
 		return;
 	}
 
-	// 2) RingBuffer에서 패킷 단위로 뽑아서 ProcessPacket 호출
 	while (true)
 	{
 		if (!recvRing.Has(sizeof(PacketHeader)))
 			break;
 
-		Packet pkt;
-		recvRing.Peek(&pkt.header, sizeof(PacketHeader));
+		PacketHeader header{};
+		if (!recvRing.Peek(&header, sizeof(header)))
+			break;
 
-		if (pkt.header.size < sizeof(PacketHeader) ||
-			pkt.header.size > MAX_PACKET_SIZE)
+		if (header.size < sizeof(PacketHeader) || header.size > MAX_PACKET_SIZE)
+		{
+			std::cout << "[Session] Invalid packet size=" << header.size
+				<< " session=" << this << "\n";
+			RequestClose();
+			return;
+		}
+
+		if (!recvRing.Has(header.size))
+			break;
+
+		recvRing.Skip(sizeof(PacketHeader));
+		const int bodySize = static_cast<int>(header.size - sizeof(PacketHeader));
+
+		std::vector<char> body(bodySize);
+		if (bodySize > 0 && !recvRing.Peek(body.data(), bodySize))
 		{
 			RequestClose();
 			return;
 		}
 
-		if (!recvRing.Has(pkt.header.size))
-			break;
-		recvRing.Skip(sizeof(PacketHeader));
-		int bodySize = pkt.header.size - sizeof(PacketHeader);
+		Packet pkt{};
+		pkt.header = header;
+		pkt.body = bodySize > 0 ? body.data() : nullptr;
 
-		std::vector<char> body(bodySize);
-		recvRing.Peek(body.data(), bodySize);
-
-		Packet safePkt;
-		safePkt.header = pkt.header;
-		safePkt.body = body.data();
-		
-		ProcessPacket(this, safePkt);
-
+		ProcessPacket(this, pkt);
 		recvRing.Skip(bodySize);
 	}
-	// 다시 recv 등록
+
 	PostRecv();
 }
 
-void Session::OnSendComplete(DWORD bytes)
+void Session::OnSendComplete(SendContext* context, DWORD bytes, bool success)
 {
-	pendingIO.fetch_sub(1);
+	pendingIO.fetch_sub(1, std::memory_order_acq_rel);
 
-	// 에러 / FIN
-	if (bytes == 0)
-	{
-		#if defined(_DEBUG)
-			std::cout
-			 << "[IOCP][SendComplete][FIN/ERR] session=" << this
-			 << " sock=" << (int)sock
-			 << " transferred=0"
-			 << " tid=" << GetCurrentThreadId()
-			 << "\n";
-		#endif  // 디버깅용
+	#if defined(_DEBUG)
+	const ULONG intended = context ? context->wsabuf.len : 0;
+	std::cout << "[IOCP][SendComplete] session=" << this
+		<< " sock=" << (int)sock
+		<< " bytes=" << bytes
+		<< " intended=" << intended
+		<< " success=" << success
+		<< " pendingIO=" << pendingIO.load()
+		<< " ctx=" << context
+		<< " tid=" << GetCurrentThreadId()
+		<< "\n";
+	#endif
 
-		sendPosted.store(false);
+	delete context;
+
+	if (!success || bytes == 0)
 		RequestClose();
-		return;
-	}
-
-	 #if defined(_DEBUG)
-			// 핵심: 부분 전송(Partial Send) 탐지
-	const ULONG intended = sendWsabuf.len;
-	if (bytes < intended)
-		 {
-		std::cout
-			 << "[IOCP][SendComplete][PARTIAL] session=" << this
-			 << " sock=" << (int)sock
-			 << " transferred=" << bytes
-			 << " intended=" << intended
-			 << " tid=" << GetCurrentThreadId()
-			 << "\n";
-		}
-	#endif	// 디버깅용
-		
-
-	bool needMore = false;
-	{
-		std::lock_guard<std::mutex> lock(sendMutex);
-
-		if (sendQueue.empty())
-		{
-			sendOffset = 0;
-			needMore = false;
-		}
-		else
-		{
-			auto& front = sendQueue.front();
-			const size_t remaining = (sendOffset <= front.size()) ? (front.size() - sendOffset) : front.size();
-			const size_t sent = (size_t)bytes;
-
-			if (sent < remaining)
-			{
-				// 부분 전송: offset만 증가시키고 같은 패킷 이어서 전송
-				sendOffset += sent;
-				needMore = true;
-			}
-			else
-			{
-				// 해당 패킷 전송 완료
-				sendQueue.pop_front();
-				sendOffset = 0;
-				needMore = !sendQueue.empty();
-			}
-		}
-	}
-
-	sendPosted.store(false);
-
-	if(needMore)
-		PostSend();
 }
 
 void Session::RequestClose()
 {
-	// 이미 종료중이라면 아무 것도 안 한다.
 	SessionState expected = SessionState::Connected;
-	if (!state.compare_exchange_strong(expected, SessionState::Closing))
+	if (!state.compare_exchange_strong(expected, SessionState::Closing, std::memory_order_acq_rel))
 		return;
 
-	// 여기서 하는 일은 딱 1개: GameServer에게 "논리적 disconnect" 알림
-	OnSessionDisconnected(this);	// GameServer의 Instance를 활용하여 바로 보낼 수 있지만, Protocol이 수행하도록 하는게 더 바람직 한지?
-	//GameServer::Instance().EnqueueDisconnectJob(this);
+	std::cout << "[IOCP][Disconnect] session=" << this
+		<< " sock=" << (int)sock
+		<< " pendingIO=" << pendingIO.load()
+		<< " state=Closing\n";
 
-	// shutdown/closesocket 금지 (물리 종료는 WorkerThread에서만)
+	Close();
+	OnSessionDisconnected(this);
 }
-
-WSAOVERLAPPED* Session::GetRecvOverlapped() { return &recvOverlapped; }
-WSAOVERLAPPED* Session::GetSendOverlapped() { return &sendOverlapped; }
 
 void Session::SendPacket(uint16_t id, const void* data, uint16_t dataSize)
 {
 	if (id != PKT_SC_SHUTDOWN)
 	{
-		if (GetState() == SessionState::Closing)
+		if (GetState() != SessionState::Connected)
 			return;
 
 		if (GameServer::Instance().IsShuttingDown())
 			return;
 	}
 
-
-	uint16_t packetSize = sizeof(PacketHeader) + dataSize;
-
-	if (packetSize > MAX_PACKET_SIZE)
+	const uint32_t packetSize32 = static_cast<uint32_t>(sizeof(PacketHeader)) + dataSize;
+	if (packetSize32 < sizeof(PacketHeader) || packetSize32 > MAX_PACKET_SIZE)
 	{
-		std::cout << "[SendPacket] 현재 패킷 크기 초과로 전송 불가 id=" << id << " size=" << packetSize << "\n";
-		return;	// 여기서 RequestClose()를 하는게 현명할까?
+		std::cout << "[SendPacket] invalid packet size id=" << id
+			<< " size=" << packetSize32 << "\n";
+		return;
 	}
 
-	// 1) 패킷 하나를 통째로 담을 buffer 생성
+	if (dataSize > 0 && data == nullptr)
+	{
+		std::cout << "[SendPacket] null body id=" << id
+			<< " size=" << dataSize << "\n";
+		return;
+	}
+
+	const uint16_t packetSize = static_cast<uint16_t>(packetSize32);
 	std::vector<char> packet(packetSize);
 
-	// 2) 헤더 채우기
 	PacketHeader header = { packetSize, id };
-
-	// 3) [헤더][바디] 복사
 	memcpy(packet.data(), &header, sizeof(header));
-	if(dataSize > 0)
+	if (dataSize > 0)
 		memcpy(packet.data() + sizeof(header), data, dataSize);
 
-	// 4) 큐에 push
-	bool needKick = false;
-	{
-		std::lock_guard<std::mutex> lock(sendMutex);
-		sendQueue.push_back(std::move(packet));
-		//if(sendPosted == false)
-		//{
-		//	sendPosted.store(true);
-		//	needKick = true;
-		//}
-	}
-
-	PostSend();
+	PostSend(packet.data(), static_cast<int>(packet.size()));
 }
 
 bool Session::TryBeginDestroy()
 {
 	bool expected = false;
-	return destroying.compare_exchange_strong(expected, true);
+	return destroying.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
 }
 
 void Session::Close()
 {
-	if (sock != INVALID_SOCKET)
+	bool expected = false;
+	if (!closeIssued.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+		return;
+
+	SOCKET oldSock = sock;
+	if (oldSock != INVALID_SOCKET)
 	{
-		shutdown(sock, SD_BOTH);
-		closesocket(sock);
+		shutdown(oldSock, SD_BOTH);
+		closesocket(oldSock);
 		sock = INVALID_SOCKET;
 	}
+
+	state.store(SessionState::Closed, std::memory_order_release);
+
+	std::cout << "[IOCP][Close] session=" << this
+		<< " sock=" << (int)oldSock
+		<< " pendingIO=" << pendingIO.load()
+		<< " state=Closed\n";
 }
 
 SOCKET& Session::GetSocket()

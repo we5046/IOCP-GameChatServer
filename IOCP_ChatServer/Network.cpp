@@ -18,23 +18,21 @@ static void TryDestroySession(Session* session)
 {
 	if (!session) return;
 
-	if (session->GetState() != SessionState::Closing) return;
+	if (session->GetState() == SessionState::Connected) return;
 	if (!session->IsGamecleanupDone()) return;
 	if (session->GetPendingIO() != 0) return;
 
-	// 여기까지 왔으면 "지금 당장 삭제 가능" 상태
+	// 논리 종료, 게임 정리, pending I/O 완료 후에만 세션을 제거한다.
 	if (!session->TryBeginDestroy()) return;
 
 	Network::Instance().RemoveSession(session);
-	session->Close();
 	delete session;
 }
 
-// Network.cpp
 bool Network::Init()
 {
 	InitializeCriticalSection(&m_lock);
-	m_hIOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr,	0, 0);
+	m_hIOCP = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0, 0);
 
 	if (m_hIOCP == nullptr)
 		return false;
@@ -54,14 +52,11 @@ Network::~Network()
 	DeleteCriticalSection(&m_lock);
 }
 
-
-// 아마도 하드웨어 스레드 개수 구하는 것 같은데 
 unsigned int GetWorkerThreadCount()
 {
 	unsigned int n = std::thread::hardware_concurrency();
 	return (n == 0) ? 4 : n;
 }
-
 
 DWORD WINAPI WorkerThread(LPVOID lpParam)
 {
@@ -80,52 +75,59 @@ DWORD WINAPI WorkerThread(LPVOID lpParam)
 			&overlapped,
 			INFINITE);
 
-		// 1) shutdown signal 먼저 처리
+		// overlapped == nullptr이면 워커 종료 또는 cleanup-only completion이다.
 		if (overlapped == nullptr)
 		{
 			if (session == nullptr)
 			{
 				std::cout << "[WorkerThread] exit\n";
-				break; // (a) 워커 종료
+				break;
 			}
-			// (b) cleanup-only completion
+
 			TryDestroySession(session);
 			continue;
 		}
 
 		if (session == nullptr)
 		{
-			// completion key가 nullptr인 비정상 케이스(로그만 남기고 continue 권장)
+			// completion key가 비어 있으면 처리할 세션이 없으므로 로그만 남긴다.
 			std::cout << "[WorkerThread] completionKey is null (unexpected)\n";
 			continue;
 		}
 
-		if (overlapped == session->GetRecvOverlapped())
+		IocpContext* context = reinterpret_cast<IocpContext*>(overlapped);
+		const bool success = ret == TRUE;
+		const DWORD err = success ? 0 : GetLastError();
+
+		if (!success)
 		{
-			session->OnRecvComplete(bytesTransferred);
+			std::cout << "[Worker] IO failed. err=" << err
+				<< " session=" << session
+				<< " ctx=" << context
+				<< " type=" << static_cast<int>(context->type)
+				<< "\n";
+		}
+
+		if (context->type == IoType::Recv)
+		{
+			session->OnRecvComplete(bytesTransferred, success);
 			TryDestroySession(session);
-			printf("[RECV COMPLETE] bytes=%u session=%p\n", bytesTransferred, session);
-			//std::cout << "[Thread " << GetCurrentThreadId() << "] RecvComplete\n";
 			continue;
 		}
-		else if (overlapped == session->GetSendOverlapped())
+
+		if (context->type == IoType::Send)
 		{
-			session->OnSendComplete(bytesTransferred);
+			session->OnSendComplete(static_cast<SendContext*>(context), bytesTransferred, success);
 			TryDestroySession(session);
-			printf("[SEND COMPLETE] bytes=%u session=%p\n", bytesTransferred, session);
-			//std::cout << "[Thread " << GetCurrentThreadId() << "] SendComplete\n";
 			continue;
 		}
-		else
-		{
-			DWORD err = ret ? 0 : GetLastError();
-			std::cout << "[Worker] Disconnect. err=" << err << " session=" << session << "\n";
-			session->RequestClose();
-			TryDestroySession(session);
-		}
+
+		std::cout << "[Worker] Unknown IO context. session=" << session
+			<< " ctx=" << context << "\n";
+		session->RequestClose();
+		TryDestroySession(session);
 	}
 	return 0;
-
 }
 
 bool Network::StartWorkerThreads(HANDLE& gIOCP)
@@ -159,7 +161,14 @@ bool Network::StartWorkerThreads(HANDLE& gIOCP)
 void Network::RemoveSession(Session* s)
 {
 	EnterCriticalSection(&m_lock);
-	m_sessions.erase(s->GetSocket());
+	for (auto it = m_sessions.begin(); it != m_sessions.end(); ++it)
+	{
+		if (it->second == s)
+		{
+			m_sessions.erase(it);
+			break;
+		}
+	}
 	LeaveCriticalSection(&m_lock);
 }
 
@@ -175,7 +184,7 @@ void Network::RequestShutdownAllSessions()
 	EnterCriticalSection(&m_lock);
 	for (auto& [sock, session] : m_sessions)
 	{
-		// 수정(1)
+		// 종료 패킷을 먼저 보내고 논리 종료를 요청한다.
 		session->SendPacket(PKT_SC_SHUTDOWN, nullptr, 0);
 		session->RequestClose();
 	}
@@ -184,18 +193,17 @@ void Network::RequestShutdownAllSessions()
 
 void Network::StopWorkerThreads()
 {
-	// 워커 스레드가 없으면 종료할 것 없음
 	if (m_WorkerThreads.empty())
 		return;
 
-	// 각 워커 스레드에 종료 신호(overlapped==nullptr, completionKey==0)를 보낸다.
-	for(unsigned int i = 0; i < m_WorkerThreads.size(); ++i)
+	// 각 워커 스레드에 종료 신호(overlapped == nullptr, completionKey == 0)를 보낸다.
+	for (unsigned int i = 0; i < m_WorkerThreads.size(); ++i)
 	{
 		PostQueuedCompletionStatus(m_hIOCP, 0, 0, nullptr);
 	}
 
 	size_t index = 0;
-	while(index < m_WorkerThreads.size())
+	while (index < m_WorkerThreads.size())
 	{
 		size_t remaining = m_WorkerThreads.size() - index;
 		DWORD chunk = (DWORD)((remaining > MAXIMUM_WAIT_OBJECTS) ? MAXIMUM_WAIT_OBJECTS : remaining);
@@ -232,8 +240,8 @@ bool Network::AllSessionsIOCompleted()
 	return true;
 }
 
-// AcceptThread 함수 선언필요해서 작성
 DWORD WINAPI AcceptThread(LPVOID lpParam);
+
 bool Network::StartAcceptThread(SOCKET listenSock)
 {
 	m_listenSocket = listenSock;
@@ -246,16 +254,16 @@ void Network::SignalStop()
 {
 	m_running = false;
 
-	// accept() 깨우기
+	// accept()를 깨우기 위해 listen socket을 닫는다.
 	SOCKET s = m_listenSocket;
 	m_listenSocket = INVALID_SOCKET;
-	if( s != INVALID_SOCKET )
+	if (s != INVALID_SOCKET)
 		closesocket(s);
 }
 
 void Network::JoinAcceptThread()
 {
-	if(m_acceptThread)
+	if (m_acceptThread)
 	{
 		WaitForSingleObject(m_acceptThread, INFINITE);
 		CloseHandle(m_acceptThread);
@@ -274,30 +282,27 @@ DWORD WINAPI AcceptThread(LPVOID lpParam)
 		{
 			int err = WSAGetLastError();
 
-			// SignalStop()에서 closesocket(listenSock)을 했으면 이 if문에서 걸림 -> 정상 종료
+			// SignalStop에서 listen socket을 닫은 경우는 정상 종료다.
 			if (!Network::Instance().m_running)
 				break;
 
-			// 그 외의 에러
 			std::cout << "[AcceptThread] accept failed: " << err << "\n";
 			continue;
 		}
 
-		// 정상 accept 처리
-		// Session 생성 + IOCP 등록 + PostRecv + GameServer Connect Job 등록
+		// Session 생성, IOCP 등록, PostRecv, GameServer Connect Job 등록.
 		Session* session = new Session(client);
 
 		Network::Instance().AddSession(session);
 		GameServer::Instance().EnqueueConnectJob(session);
 
-		// 서버에 접속한 클라이언트를 IOCP로 감시해주세요. 다만 KEY는 이제부터 Session*
+		// IOCP completion key는 Session*로 사용한다.
 		CreateIoCompletionPort((HANDLE)client, Network::Instance().GetIocpHandle(), (ULONG_PTR)session, 0);
 
 		session->PostRecv();
 	}
 	return 0;
 }
-
 
 BOOL WINAPI ConsoleHandler(DWORD ctrlType)
 {
@@ -309,7 +314,7 @@ BOOL WINAPI ConsoleHandler(DWORD ctrlType)
 	case CTRL_SHUTDOWN_EVENT:
 		Network::Instance().SignalStop();
 		GameServer::Instance().Shutdown();
-		return TRUE; // OS에게 "우리가 처리한다"라고 알림
+		return TRUE;
 	default:
 		return FALSE;
 	}
@@ -321,11 +326,8 @@ int main()
 	WSAData wsa;
 	WSAStartup(MAKEWORD(2, 2), &wsa);
 
-	// ★ FSM 초기화 (아주 중요)
 	GameServer::Instance().Init();
-	// 이 안에서 InitFSM() 호출
 
-	// GameThread 먼저 시작
 	HANDLE hGameThread = CreateThread(
 		NULL,
 		0,
@@ -340,13 +342,8 @@ int main()
 	}
 	else
 	{
-		// gameThread.detach(); 와 같은 행위
-		CloseHandle(hGameThread); // 핸들을 닫아도 스레드는 계속 돈다 (Detach와 동일)
+		CloseHandle(hGameThread);
 	}
-	//std::thread gameThread([]() {
-	//	GameServer::Instance().GameThreadLoop();
-	//	});
-	//gameThread.detach();
 
 	SOCKET listenSock = socket(AF_INET, SOCK_STREAM, 0);
 	SOCKADDR_IN listenAddr;
@@ -357,7 +354,6 @@ int main()
 	bind(listenSock, (SOCKADDR*)&listenAddr, sizeof(listenAddr));
 	listen(listenSock, SOMAXCONN);
 
-	// 인자 넣는거 못외움
 	if (!Network::Instance().Init())
 	{
 		std::cout << "Network Init 실패\n";
@@ -366,23 +362,21 @@ int main()
 
 	if (Network::Instance().StartAcceptThread(listenSock))
 	{
-		listenSock = INVALID_SOCKET; // AcceptThread가 소켓 관리를 맡음
+		listenSock = INVALID_SOCKET;
 	}
 	else
 	{
-		closesocket(listenSock); // 실패했으면 main이 닫고 종료
+		closesocket(listenSock);
 		std::cerr << "AcceptThread 시작 실패\n";
 		return -1;
 	}
 
-	while(Network::Instance().m_running)
+	while (Network::Instance().m_running)
 	{
 		Sleep(100);
 	}
 
-	// AcceptThread 사용 종료
 	Network::Instance().JoinAcceptThread();
 	WSACleanup();
 	return 0;
-
 }

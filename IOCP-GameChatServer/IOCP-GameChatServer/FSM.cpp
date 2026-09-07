@@ -37,8 +37,8 @@ void InitFSM()
     // InRoom에서는 CHAT 가능 (원하면 ENTER_ROOM로 방 이동 허용도 가능)
     g_FSM[(int)PlayerState::InRoom][PKT_CS_CHAT] = FSM_Chat;
 
-    // (선택) InRoom에서 ENTER_ROOM 허용해서 방 이동 지원
-    // g_FSM[(int)PlayerState::InRoom][PKT_CS_ENTER_ROOM] = FSM_EnterRoom;
+    // InRoom에서 ENTER_ROOM 허용 -> 방 이동 지원
+    g_FSM[(int)PlayerState::InRoom][PKT_CS_ENTER_ROOM] = FSM_EnterRoom;
 }
 
 FSMHandler GetHandler(PlayerState st, uint16_t packetId)

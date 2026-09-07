@@ -28,6 +28,9 @@ private:
 	GameJobQueue jobQueue;
 	bool running = true;
 
+	// Player ID 발급기. 게임 스레드에서만 접근하므로 atomic 불필요
+	uint32_t nextPlayerId = 1;
+
 	void HandleLogin(Session* s, const Packet& pkt);
 	void HandleChat(Player* p, const Packet& pkt);
 	void HandleEnterRoom(Session* s, const Packet& pkt);

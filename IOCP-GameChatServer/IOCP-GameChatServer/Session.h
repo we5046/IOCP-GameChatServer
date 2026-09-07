@@ -9,8 +9,6 @@
 
 constexpr size_t BUFFER_SIZE = 4096;
 
-class Session;
-
 enum class SessionState
 {
 	Connected,

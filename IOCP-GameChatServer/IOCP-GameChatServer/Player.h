@@ -28,6 +28,7 @@ public:
 	explicit Player(Session* s);
 
 	uint32_t GetId() const { return id; }
+	void SetId(uint32_t v) { id = v; }
 
 	Session* GetSession() const;
 	Room* GetRoom() const;

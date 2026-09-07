@@ -114,9 +114,6 @@ void GameServer::HandleLogin(Session* s, const Packet& pkt)
 	if (p == nullptr)
 		return;
 
-	if (p == nullptr)
-		return;
-
 	p->SetName(name);
 	
 	std::cout << "[GameServer] Login: " << name << "\n";
@@ -225,9 +222,11 @@ void GameServer::OnSessionDisconnected(Session* s)
 void GameServer::OnSessionConnected(Session* s)
 {
 	Player* p = new Player(s);
+	p->SetId(nextPlayerId++);
 	players.emplace(s, p);
 
-	std::cout << "[GameServer] Player connected (session = " << s << ")\n";
+	std::cout << "[GameServer] Player connected (id = " << p->GetId()
+		<< ", session = " << s << ")\n";
 }
 
 void GameServer::EnqueuePacketJob(Session* s, const Packet& pkt)

@@ -10,6 +10,9 @@ bool IsKnownPacketId(uint16_t id)
 	case PKT_CS_LOGIN:
 	case PKT_CS_CHAT:
 	case PKT_CS_ENTER_ROOM:
+	case PKT_CS_HELLO:
+	case PKT_CS_JOIN_ROOM:
+	case PKT_CS_READY:
 		return true;
 	default:
 		return false;

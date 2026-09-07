@@ -24,11 +24,15 @@ private:
 	PlayerState state = PlayerState::None;
 
 	uint32_t id = 0;
+	bool ready = false;      // 대기실 준비 상태
 public:
 	explicit Player(Session* s);
 
 	uint32_t GetId() const { return id; }
 	void SetId(uint32_t v) { id = v; }
+
+	bool IsReady() const { return ready; }
+	void SetReady(bool v) { ready = v; }
 
 	Session* GetSession() const;
 	Room* GetRoom() const;

@@ -31,9 +31,24 @@ private:
 	// Player ID 발급기. 게임 스레드에서만 접근하므로 atomic 불필요
 	uint32_t nextPlayerId = 1;
 
+	// Bomb Arena 대기실. 채팅 방 번호와 겹치지 않도록 100부터 발급한다.
+	int32_t nextGameRoomId = 100;
+	uint32_t nextMatchId = 1;
+
 	void HandleLogin(Session* s, const Packet& pkt);
 	void HandleChat(Player* p, const Packet& pkt);
 	void HandleEnterRoom(Session* s, const Packet& pkt);
+
+	// Bomb Arena 대기실 처리
+	void HandleHello(Session* s, const Packet& pkt);
+	void HandleJoinRoom(Session* s, const Packet& pkt);
+	void HandleReady(Session* s, const Packet& pkt);
+
+	void SendError(Session* s, uint16_t rejectedId, uint16_t code);
+	void SendRoomState(Session* s, Room* room);
+	void BroadcastRoomState(Room* room);
+	void TryStartGame(Room* room);
+	Room* AcquireGameRoom(int32_t requested);
 
 	// 방 관련 헬퍼 함수
 	Room* FindRoom(int32_t roomId);
@@ -70,4 +85,9 @@ public:
 	void OnLogin(Session* s, const Packet& pkt);
 	void OnEnterRoom(Session* s, const Packet& pkt);
 	void OnChat(Session* s, const Packet& pkt);
+
+	// Bomb Arena 대기실 진입점 (FSM이 호출)
+	void OnHello(Session* s, const Packet& pkt);
+	void OnJoinRoom(Session* s, const Packet& pkt);
+	void OnReady(Session* s, const Packet& pkt);
 };
